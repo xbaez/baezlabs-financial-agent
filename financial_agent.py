@@ -3,11 +3,11 @@
 BaezLabs Financial Agent v2
 ============================
 Extracción personalizada por banco:
-  - Scotiabank   → PDF adjunto (password = RFC)
-  - Liverpool    → Cuerpo del email (HTML/texto)
-  - Banregio     → Cuerpo del email (HTML/texto)
-  - Hey Banco    → Cuerpo del email (HTML/texto)
-  - Amex         → Reenvío manual (instrucciones abajo) o skip
+  - Bank A   → PDF adjunto (password = RFC)
+  - Bank C    → Cuerpo del email (HTML/texto)
+  - Bank B     → Cuerpo del email (HTML/texto)
+  - Bank D    → Cuerpo del email (HTML/texto)
+  - Bank E         → Reenvío manual (instrucciones abajo) o skip
 
 Dependencias:
   pip install google-auth google-auth-oauthlib google-api-python-client \
@@ -47,10 +47,10 @@ CONFIG = {
 # last_4_map: mapeo dígitos → nombre legible
 
 BANK_CONFIG = {
-    "Scotiabank": {
+    "Bank A": {
         "source": "pdf",
         "gmail_query": (
-            "from:(scotiabank.com.mx OR notificaciones.scotiabank.com.mx) "
+            "from:(banka.com OR notificaciones.banka.com) "
             "subject:(estado de cuenta) newer_than:45d"
         ),
         "pdf_password": CONFIG["rfc"],   # RFC como password
@@ -60,44 +60,44 @@ BANK_CONFIG = {
             "ZZZZ": "Scotia Card 3",
         },
     },
-    "Banregio": {
+    "Bank B": {
         "source": "email_body",
         "gmail_query": (
-            "from:(banregio.com OR banregio.com.mx) "
+            "from:(bankb.com OR bankb.com.mx) "
             "subject:(estado de cuenta) newer_than:45d"
         ),
-        "last_4_map": {"XXXX": "Banregio Platinum"},
+        "last_4_map": {"XXXX": "Bank B Platinum"},
     },
-    "Liverpool": {
+    "Bank C": {
         "source": "email_body",
         "gmail_query": (
-            "from:(liverpool.com.mx OR tarjetaliverpool.com.mx OR e-liverpool.com.mx) "
+            "from:(bankc.com OR bankc-alt.com OR bankc-e.com) "
             "subject:(estado de cuenta) newer_than:45d"
         ),
-        "last_4_map": {"XXXX": "Liverpool VISA"},
+        "last_4_map": {"XXXX": "Bank C VISA"},
     },
-    "Hey Banco": {
+    "Bank D": {
         "source": "email_body",
         "gmail_query": (
-            "from:(heybanco.com OR hola@heybanco.com) "
+            "from:(bankd.com OR hola@bankd.com) "
             "subject:(estado de cuenta) newer_than:45d"
         ),
-        "last_4_map": {"XXXX": "Hey Banco Crédito"},
+        "last_4_map": {"XXXX": "Bank D Crédito"},
     },
-    "Amex": {
-        # PDF descargado desde la app Amex y reenviado a tu propio correo
-        # Asunto sugerido al reenviar: "Amex estado cuenta"
+    "Bank E": {
+        # PDF descargado desde la app Bank E y reenviado a tu propio correo
+        # Asunto sugerido al reenviar: "Bank E estado cuenta"
         "source": "pdf",
-        "pdf_password": None,  # PDFs de Amex MX generalmente no tienen password
-        "gmail_query": "subject:(amex) newer_than:45d has:attachment",
+        "pdf_password": None,  # PDFs de Bank E MX generalmente no tienen password
+        "gmail_query": "subject:(bank e) newer_than:45d has:attachment",
         "last_4_map": {
-            "XXXX": "Amex Card 1",
-            "YYYY": "Amex Card 2",
+            "XXXX": "Bank E Card 1",
+            "YYYY": "Bank E Card 2",
         },
         "skip_if_no_email": True,   # Avisa pero no falla si no reenviaste aún
         "manual_note": (
-            "📲 AMEX: Descarga el PDF desde la app → reenvíatelo con asunto\n"
-            "   exacto: 'Amex estado cuenta' → el script lo detecta automáticamente"
+            "📲 BANK E: Descarga el PDF desde la app → reenvíatelo con asunto\n"
+            "   exacto: 'Bank E estado cuenta' → el script lo detecta automáticamente"
         ),
     },
 }
@@ -426,20 +426,20 @@ def create_payment_reminders(cal, d: dict):
 # ─────────────────────────────────────────────
 
 PAYMENT_SOURCES = {
-    "Hey Banco": {
+    "Bank D": {
         "gmail_queries": [
-            "from:noreply@heybanco.com subject:(pago a tarjeta) newer_than:45d",
+            "from:noreply@bankd.com subject:(pago a tarjeta) newer_than:45d",
         ],
     },
-    "Banregio": {
+    "Bank B": {
         "gmail_queries": [
-            "from:noreply@banregio.com subject:(pago a tarjeta) newer_than:45d",
+            "from:noreply@bankb.com subject:(pago a tarjeta) newer_than:45d",
         ],
     },
-    "Amex": {
+    "Bank E": {
         "gmail_queries": [
-            "from:AmericanExpress@welcome.americanexpress.com subject:(pago ha sido recibido) newer_than:45d",
-            "from:AmericanExpress@welcome.americanexpress.com subject:(mensaje de servicio) newer_than:45d",
+            "from:BankE@welcome.banke.com subject:(pago ha sido recibido) newer_than:45d",
+            "from:BankE@welcome.banke.com subject:(mensaje de servicio) newer_than:45d",
         ],
     },
 }
@@ -450,7 +450,7 @@ Analiza el texto y extrae los datos del pago. Puede haber uno o varios pagos en 
 
 Devuelve un JSON array. Cada objeto debe tener exactamente estas claves:
 {
-  "banco_origen": "nombre del banco que realizó el pago (Hey Banco, Banregio, Amex, etc.)",
+  "banco_origen": "nombre del banco que realizó el pago (Bank D, Bank B, Bank E, etc.)",
   "tarjeta_destino_last4": "últimos 4 dígitos de la tarjeta que recibió el pago",
   "monto": número sin símbolos ni comas,
   "fecha_pago": "YYYY-MM-DD",
@@ -461,7 +461,7 @@ Devuelve un JSON array. Cada objeto debe tener exactamente estas claves:
 Reglas:
 - Montos en MXN, solo números
 - Si no encuentras los últimos 4 dígitos de la tarjeta destino, usa null
-- Para emails de Amex, la terminación puede aparecer como 6 dígitos, por ejemplo "terminación: 062005". En ese caso los últimos 4 dígitos son "2005" — usa SIEMPRE solo los últimos 4 dígitos
+- Para emails de Bank E, la terminación puede aparecer como 6 dígitos, por ejemplo "terminación: 062005". En ese caso los últimos 4 dígitos son "2005" — usa SIEMPRE solo los últimos 4 dígitos
 - SOLO devuelve el JSON array, sin texto adicional ni backticks
 
 Texto a analizar:

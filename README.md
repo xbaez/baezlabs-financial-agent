@@ -32,7 +32,7 @@ Gmail (bank statement emails)
 
 ## Features
 
-- **Multi-bank support** — Scotiabank (password-protected PDF), Liverpool, Banregio, Hey Banco, Amex
+- **Multi-bank support** — Bank A (password-protected PDF), Bank C, Bank B, Bank D, Bank E
 - **Dual extraction modes** — PDF attachments (with RFC-based password unlocking) and HTML email body parsing
 - **Claude-powered parsing** — structured JSON extraction tolerant of varying statement formats
 - **Notion sync** — updates balance, total debt, minimum payment, credit limit, cut date, and due date per card
@@ -75,7 +75,7 @@ cp .env.example .env
 | `NOTION_TOKEN` | Notion integration secret (`secret_...`) |
 | `NOTION_CARDS_DB` | Notion database ID for credit cards |
 | `NOTION_PAYMENTS_DB` | Notion database ID for payment records |
-| `RFC_TITULAR` | Your RFC (used as PDF password for Scotiabank) |
+| `RFC_TITULAR` | Your RFC (used as PDF password for Bank A) |
 | `GOOGLE_CALENDAR_ID` | Calendar ID, usually `primary` |
 
 To find a Notion database ID: open the database in Notion, copy the URL, and extract the 32-character hex string before the `?`.
@@ -101,7 +101,7 @@ On first run, a browser window opens for OAuth consent. After approval, `token.j
 Edit `BANK_CONFIG` in `financial_agent.py` to match your cards:
 
 ```python
-"Scotiabank": {
+"Bank A": {
     "last_4_map": {
         "1234": "Scotia Gold",   # last 4 digits → display name
         "5678": "Scotia Platinum",
@@ -142,11 +142,11 @@ To add a new bank, add an entry to `BANK_CONFIG` and, if it sends payment receip
 
 | Bank | Format | Notes |
 |---|---|---|
-| Scotiabank | Password-protected PDF | Password = RFC (tries uppercase, lowercase, truncated variants) |
-| Liverpool | HTML email body | Filters navigation and promotional content |
-| Banregio | HTML/plain text email body | |
-| Hey Banco | HTML email body | |
-| Amex | Unprotected PDF | Download from Amex app → forward to yourself with subject "Amex estado cuenta" |
+| Bank A | Password-protected PDF | Password = RFC (tries uppercase, lowercase, truncated variants) |
+| Bank C | HTML email body | Filters navigation and promotional content |
+| Bank B | HTML/plain text email body | |
+| Bank D | HTML email body | |
+| Bank E | Unprotected PDF | Download from Bank E app → forward to yourself with subject "Bank E estado cuenta" |
 
 For any bank sending HTML emails, the agent prefers plain-text parts when available and falls back to BeautifulSoup HTML cleaning.
 
