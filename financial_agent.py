@@ -34,6 +34,7 @@ CONFIG = {
     "notion_token":         os.environ.get("NOTION_TOKEN", ""),
     "notion_cards_db":      os.environ.get("NOTION_CARDS_DB", ""),
     "notion_payments_db":   os.environ.get("NOTION_PAYMENTS_DB", ""),
+    "notion_dashboard_id":  os.environ.get("NOTION_DASHBOARD_ID", ""),
     "calendar_id":          os.environ.get("GOOGLE_CALENDAR_ID", "primary"),
     "anthropic_api_key":    os.environ.get("ANTHROPIC_API_KEY", ""),
     "reminder_days_before": 3,
@@ -343,6 +344,12 @@ def update_notion_card(nc, page_id: str, d: dict):
         if d.get(key) is not None:
             props[notion_key] = {"number": float(d[key])}
 
+    # When a new statement is processed, reset Balance Actual to deuda_total
+    # as the fresh baseline (cross-reference may reduce it afterwards).
+    # Only applies when Claude didn't extract balance_actual explicitly.
+    if d.get("balance_actual") is None and d.get("deuda_total") is not None:
+        props["Balance Actual"] = {"number": float(d["deuda_total"])}
+
     if d.get("dia_de_corte") is not None:
         props["Día de Corte"] = {"number": int(d["dia_de_corte"])}
 
@@ -629,9 +636,9 @@ def fetch_notion_payments_for_card(nc, last4: str, after_date) -> list[dict]:
 
         if after_date:
             try:
-                if date_cls.fromisoformat(fecha_str) <= after_date:
+                if date_cls.fromisoformat(fecha_str[:10]) <= after_date:
                     continue
-            except ValueError:
+            except (ValueError, AttributeError):
                 continue
 
         key = (last4, fecha_str)
@@ -659,10 +666,38 @@ def cross_reference_payments(nc, card_summary: list, payment_summary: list) -> l
         last4      = card["last4"]
         dia_corte  = card.get("dia_de_corte")
         deuda      = card["deuda"]
+        vence_str  = card.get("vence")
 
-        # Derive the most recent statement cut date from dia_de_corte
+        # If dia_de_corte wasn't extracted from the statement, read it from Notion
+        if dia_corte is None and card.get("page_id"):
+            try:
+                notion_page = nc.pages.retrieve(page_id=card["page_id"])
+                dia_corte = (notion_page.get("properties", {})
+                             .get("Día de Corte", {})
+                             .get("number"))
+            except Exception:
+                pass
+
+        # Derive the cut date from this statement's due date + dia_de_corte.
+        # Using the due date (not today) pins the cut to the correct cycle even
+        # when statements arrive late or runs are delayed.
+        #   cut_day < due_day  → cut was in the same month as due
+        #   cut_day >= due_day → cut was in the month before due
         corte = None
-        if dia_corte:
+        if dia_corte and vence_str:
+            try:
+                vence = date_cls.fromisoformat(vence_str[:10])
+                if dia_corte < vence.day:
+                    corte = date_cls(vence.year, vence.month, dia_corte)
+                else:
+                    if vence.month == 1:
+                        corte = date_cls(vence.year - 1, 12, dia_corte)
+                    else:
+                        corte = date_cls(vence.year, vence.month - 1, dia_corte)
+            except (ValueError, AttributeError):
+                corte = None
+        elif dia_corte:
+            # Fallback when no due date: derive from today (original logic)
             try:
                 if today.day >= dia_corte:
                     corte = date_cls(today.year, today.month, dia_corte)
@@ -691,9 +726,9 @@ def cross_reference_payments(nc, card_summary: list, payment_summary: list) -> l
             if p["last4"] != last4:
                 continue
             try:
-                if corte and date_cls.fromisoformat(p["fecha"]) <= corte:
+                if corte and date_cls.fromisoformat(p["fecha"][:10]) <= corte:
                     continue
-            except ValueError:
+            except (ValueError, AttributeError):
                 pass
             key = (p["last4"], p["fecha"])
             if key not in seen_keys:
@@ -739,6 +774,148 @@ def cross_reference_payments(nc, card_summary: list, payment_summary: list) -> l
         print("   Sin pagos post-corte encontrados para cruzar.")
     print("="*60)
     return applied
+
+# ─────────────────────────────────────────────
+# DASHBOARD — actualizar resumen y pendientes
+# ─────────────────────────────────────────────
+
+def update_notion_dashboard(nc):
+    """Refresh RESUMEN GENERAL callouts and PENDIENTES list on the main dashboard."""
+    import re as _re
+    from datetime import date as date_cls
+
+    DASHBOARD_ID = CONFIG["notion_dashboard_id"]
+
+    print("\n🔄 Actualizando dashboard Notion...")
+
+    # ── 1. Fetch all card pages ──────────────────────────────────────────────
+    db_result = nc.search(query="", filter={"value": "page", "property": "object"})
+    cards = []
+    for page in db_result.get("results", []):
+        if page.get("parent", {}).get("database_id") != CONFIG["notion_cards_db"]:
+            continue
+        props = page.get("properties", {})
+        name_list = props.get("Name", {}).get("title", [])
+        name      = name_list[0].get("plain_text", "") if name_list else ""
+        name_clean = _re.sub(r"\s*\*+\d{4}$", "", name).strip()
+
+        last4_list = props.get("Número últimos 4 digitos", {}).get("rich_text", [])
+        last4 = last4_list[0].get("plain_text", "") if last4_list else ""
+
+        deuda   = props.get("Deuda Total",       {}).get("number") or 0
+        balance = props.get("Balance Actual",    {}).get("number") or 0
+        limite  = props.get("Limite de Crédito", {}).get("number") or 0
+        pago    = props.get("Pago Mínimo",       {}).get("number") or 0
+        fecha_obj = (props.get("Fecha Límite de Pago") or {}).get("date") or {}
+        fecha = fecha_obj.get("start")
+
+        cards.append({
+            "name": name_clean, "last4": last4,
+            "deuda": deuda, "balance": balance,
+            "limite": limite, "pago": pago, "fecha": fecha,
+        })
+
+    # ── 2. Compute metrics ───────────────────────────────────────────────────
+    active       = [c for c in cards if c["balance"] > 0]
+    total_deuda  = sum(c["deuda"]   for c in active)
+    balance_mes  = sum(c["balance"] for c in active)
+    total_limite = sum(c["limite"]  for c in cards)
+    utilizacion  = (total_deuda / total_limite * 100) if total_limite else 0.0
+
+    upcoming = sorted([c for c in active if c["fecha"]], key=lambda c: c["fecha"])
+    if upcoming:
+        p  = upcoming[0]
+        fd = date_cls.fromisoformat(p["fecha"][:10])
+        proximo_str = f"{p['name']} \\*{p['last4']} — {fd.strftime('%d-%b-%Y').lower()}"
+    else:
+        proximo_str = "Sin vencimientos próximos"
+
+    # ── 3. Build replacement markdown ───────────────────────────────────────
+    def _m(amount):
+        return f"\\${amount:,.2f}"
+
+    resumen_new = "\n".join([
+        "## 📈 RESUMEN GENERAL",
+        "<columns>",
+        "\t<column>",
+        '\t\t<callout icon="💰" color="orange_bg">',
+        f"\t\t\t**DEUDA TOTAL**<br>{_m(total_deuda)}",
+        "\t\t</callout>",
+        '\t\t<callout icon="💳" color="blue_bg">',
+        f"\t\t\t**TARJETAS ACTIVAS**<br>{len(active)} de {len(cards)}",
+        "\t\t</callout>",
+        "\t</column>",
+        "\t<column>",
+        '\t\t<callout icon="📅" color="blue_bg">',
+        f"\t\t\t**BALANCE ESTE MES**<br>{_m(balance_mes)}",
+        "\t\t</callout>",
+        '\t\t<callout icon="📊" color="blue_bg">',
+        f"\t\t\t**LÍMITE TOTAL**<br>{_m(total_limite)}",
+        "\t\t</callout>",
+        "\t</column>",
+        "\t<column>",
+        '\t\t<callout icon="📅" color="yellow_bg">',
+        f"\t\t\t**PRÓXIMO PAGO**<br>{proximo_str}",
+        "\t\t</callout>",
+        '\t\t<callout icon="📈" color="green_bg">',
+        f"\t\t\t**UTILIZACIÓN**<br>{utilizacion:.2f}%",
+        "\t\t</callout>",
+        "\t</column>",
+        "</columns>",
+    ])
+
+    pending_sorted = sorted([c for c in active if c["fecha"]], key=lambda c: c["fecha"])
+    bullet_lines = []
+    for c in pending_sorted:
+        fd = date_cls.fromisoformat(c["fecha"][:10])
+        bullet_lines.append(
+            f"- {c['name']} \\*{c['last4']} — "
+            f"Saldo: {_m(c['deuda'])} \\| "
+            f"Pago mínimo: {_m(c['pago'])} \\| "
+            f"Límite: {fd.strftime('%d-%b-%Y').lower()}"
+        )
+    pendientes_new = "## 📝 PENDIENTES (próximos vencimientos)\n" + "\n".join(bullet_lines)
+
+    # ── 4. Retrieve current markdown, extract sections as old_str ───────────
+    page_md = nc.pages.retrieve_markdown(page_id=DASHBOARD_ID)
+    md      = page_md["markdown"]
+
+    m_resumen = _re.search(
+        r"(## 📈 RESUMEN GENERAL\n.*?)(?=\n<callout icon=\"💡\")",
+        md, flags=_re.DOTALL,
+    )
+    m_pendientes = _re.search(
+        r"(## 📝 PENDIENTES \(próximos vencimientos\)\n.*?)(?=\n<details>)",
+        md, flags=_re.DOTALL,
+    )
+
+    updates = []
+    if m_resumen:
+        updates.append({"type": "replace", "old_str": m_resumen.group(1), "new_str": resumen_new})
+    else:
+        print("   ⚠️  RESUMEN GENERAL no encontrado en el dashboard")
+
+    if m_pendientes:
+        updates.append({"type": "replace", "old_str": m_pendientes.group(1), "new_str": pendientes_new})
+    else:
+        print("   ⚠️  PENDIENTES no encontrado en el dashboard")
+
+    if not updates:
+        return
+
+    # ── 5. Write back only the two changed sections ──────────────────────────
+    nc.pages.update_markdown(
+        page_id=DASHBOARD_ID,
+        type="update_content",
+        update_content={"content_updates": updates},
+    )
+    print(
+        f"   ✅ Dashboard actualizado — "
+        f"{len(active)} tarjeta(s) activa(s) · "
+        f"Deuda total ${total_deuda:,.2f} · "
+        f"Utilización {utilizacion:.2f}%"
+    )
+
 
 # ─────────────────────────────────────────────
 # MAIN
@@ -915,11 +1092,13 @@ def run():
         summary       = run_statements_mode(gmail, calendar, nc, ac)
         cross_summary = cross_reference_payments(nc, summary, [])
         print_statements_summary(summary, cross_summary)
+        update_notion_dashboard(nc)
 
     elif mode == "payments":
         payment_summary = process_payment_receipts(gmail, nc, ac)
         cross_summary   = cross_reference_payments(nc, [], payment_summary)
         print_payments_summary(payment_summary, cross_summary)
+        update_notion_dashboard(nc)
 
     else:  # all
         summary         = run_statements_mode(gmail, calendar, nc, ac)
@@ -927,6 +1106,7 @@ def run():
         cross_summary   = cross_reference_payments(nc, summary, payment_summary)
         print_statements_summary(summary, cross_summary)
         print_payments_summary(payment_summary, cross_summary)
+        update_notion_dashboard(nc)
 
     print()
 
